@@ -11,16 +11,20 @@ VRChat APIは**非公式**です。
 Rustをビルドできる環境が必要です。  
 以下のコマンドを実行してビルド、インストールしてください。  
 ```sh
-git clone https://github.com/surumeika1987/noctalia-vrchat-status.git
-cd noctalia-vrchat-status
-cargo build --release --manifest-path vrchat-status-helper/Cargo.toml
+git clone https://github.com/surumeika1987/noctalia-vrchat-status-helper.git
+cd noctalia-vrchat-status-helper
+cargo build --release
 mkdir -p ~/.local/bin
-cp ./vrchat-status-helper/target/release/vrchat-status-helper ~/.local/bin/
+cp ./target/release/vrchat-status-helper ~/.local/bin/
 ```
 
 ## 使用方法
 Noctaliaプラグイン `VRChat Status` と合わせて利用してください。  
-`VRChat Status` はリポジトリ内の `vrchat-status` フォルダに存在します。  
+以下のコマンドで手動インストールできます。  
+```
+git clone https://github.com/surumeika1987/noctalia-vrchat-status.git \
+    ~/.local/share/noctalia/plugins/vrchat-status
+```
 
 ### ログイン
 以下のコマンドを利用してVRChatにログインしてください。  

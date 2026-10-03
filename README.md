@@ -15,17 +15,22 @@ A Rust build environment is required.
 Run the following commands to build and install the helper:
 
 ```sh
-git clone https://github.com/surumeika1987/noctalia-vrchat-status.git
-cd noctalia-vrchat-status
-cargo build --release --manifest-path vrchat-status-helper/Cargo.toml
+git clone https://github.com/surumeika1987/noctalia-vrchat-status-helper.git
+cd noctalia-vrchat-status-helper
+cargo build --release
 mkdir -p ~/.local/bin
-cp ./vrchat-status-helper/target/release/vrchat-status-helper ~/.local/bin/
+cp ./target/release/vrchat-status-helper ~/.local/bin/
 ```
 
 ## Usage
 
 Use this helper together with the Noctalia plugin `VRChat Status`.  
-The `VRChat Status` plugin is located in the `vrchat-status` directory of this repository.
+You can install the plugin manually with the following command:
+
+```sh
+git clone https://github.com/surumeika1987/noctalia-vrchat-status.git \
+    ~/.local/share/noctalia/plugins/vrchat-status
+```
 
 ### Logging In
 
