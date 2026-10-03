@@ -69,7 +69,7 @@ This software accepts IPC messages over a Unix domain socket.
 Use the following command to communicate with it over IPC:
 
 ```sh
-vrchat-status-helper msg <payload>
+vrchat-status-helper msg push-status <payload>
 ```
 
 The payload format is `<status-number>:<status-message>`.  
@@ -83,6 +83,13 @@ The status numbers are as follows:
 | 2 | Ask Me |
 | 1 | Do Not Disturb |
 | 0 | Offline |
+
+To ask the running daemon to resend its cached status (or `Need Login` when no
+status is cached), use:
+
+```sh
+vrchat-status-helper msg request-push
+```
 
 Set `RUST_LOG=debug` when starting the helper to enable debug logging:
 

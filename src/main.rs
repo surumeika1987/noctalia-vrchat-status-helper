@@ -50,15 +50,22 @@ async fn main() -> Result<()> {
             debug!(mode = "login", "starting helper");
             login().await
         }
-        [command, payload] if command == "msg" => {
+        [command, subcommand, payload] if command == "msg" && subcommand == "push-status" => {
             debug!(
                 mode = "msg",
                 message_len = payload.len().saturating_sub(2),
                 "starting helper"
             );
-            send_message(payload).await
+            StatusUpdate::parse(payload)?;
+            send_message(&format!("push-status {payload}")).await
         }
-        _ => bail!("usage: vrchat-status-helper [login | msg <status-number>:<message>]"),
+        [command, subcommand] if command == "msg" && subcommand == "request-push" => {
+            debug!(mode = "msg", "requesting cached helper status");
+            send_message("request-push").await
+        }
+        _ => bail!(
+            "usage: vrchat-status-helper [login | msg push-status <status-number>:<message> | msg request-push]"
+        ),
     }
 }
 
@@ -192,9 +199,8 @@ async fn authenticate_from_cookie(path: &Path) -> Result<(Configuration, String)
 }
 
 async fn send_message(payload: &str) -> Result<()> {
-    let update = StatusUpdate::parse(payload)?;
     let path = socket_path()?;
-    debug!(path = %path.display(), status = ?update.status, message_len = update.message.len(), "connecting to helper daemon");
+    debug!(path = %path.display(), "connecting to helper daemon");
     let mut stream = UnixStream::connect(&path)
         .await
         .with_context(|| format!("daemon is not listening at {}", path.display()))?;
@@ -207,6 +213,22 @@ async fn send_message(payload: &str) -> Result<()> {
     }
     debug!("daemon accepted status update request");
     Ok(())
+}
+
+#[derive(Debug)]
+enum DaemonCommand {
+    PushStatus(StatusUpdate),
+    RequestPush,
+}
+
+fn parse_daemon_command(command: &str) -> Result<DaemonCommand> {
+    if command == "request-push" {
+        return Ok(DaemonCommand::RequestPush);
+    }
+    if let Some(payload) = command.strip_prefix("push-status ") {
+        return Ok(DaemonCommand::PushStatus(StatusUpdate::parse(payload)?));
+    }
+    bail!("unknown helper IPC command")
 }
 
 struct SocketGuard(PathBuf);
@@ -254,7 +276,7 @@ fn status_from_user(response: GetUser200Response) -> StatusUpdate {
     }
 }
 
-async fn socket_server(listener: UnixListener, tx: mpsc::Sender<StatusUpdate>) -> Result<()> {
+async fn socket_server(listener: UnixListener, tx: mpsc::Sender<DaemonCommand>) -> Result<()> {
     loop {
         let (mut stream, _) = listener.accept().await?;
         debug!("accepted helper IPC connection");
@@ -266,11 +288,11 @@ async fn socket_server(listener: UnixListener, tx: mpsc::Sender<StatusUpdate>) -
                     let payload_len = data.len();
                     match String::from_utf8(data)
                         .ok()
-                        .and_then(|s| StatusUpdate::parse(&s).ok())
+                        .and_then(|s| parse_daemon_command(&s).ok())
                     {
-                        Some(update) => {
-                            debug!(status = ?update.status, message_len = update.message.len(), "received status update request");
-                            if tx.send(update).await.is_ok() {
+                        Some(command) => {
+                            debug!(command = ?command, "received helper IPC command");
+                            if tx.send(command).await.is_ok() {
                                 "ok\n"
                             } else {
                                 "daemon stopping\n"
@@ -356,6 +378,7 @@ async fn run_daemon() -> Result<()> {
     let mut observed_mtime = cookie_mtime(&cookie_path);
     let mut pending: Option<StatusUpdate> = None;
     let mut last_sent: Option<StatusUpdate> = None;
+    let mut cached_status: Option<StatusUpdate> = None;
     let mut initial_api_started_at = Instant::now();
     if let Some((config, user_id)) = session.as_ref() {
         debug!("fetching initial VRChat user status");
@@ -363,6 +386,7 @@ async fn run_daemon() -> Result<()> {
         match apis::users_api::get_user(config, user_id).await {
             Ok(response) => {
                 let current = status_from_user(response);
+                cached_status = Some(current.clone());
                 info!(status = ?current.status, "initial VRChat status fetch succeeded");
                 match notify_noctalia(&current).await {
                     Ok(()) => last_sent = Some(current),
@@ -388,10 +412,27 @@ async fn run_daemon() -> Result<()> {
 
     loop {
         tokio::select! {
-            Some(update) = rx.recv() => {
-                let replaced = pending.is_some();
-                debug!(status = ?update.status, message_len = update.message.len(), replaced, "queued latest status update");
-                pending = Some(update);
+            Some(command) = rx.recv() => {
+                match command {
+                    DaemonCommand::PushStatus(update) => {
+                        let replaced = pending.is_some();
+                        debug!(status = ?update.status, message_len = update.message.len(), replaced, "queued latest status update");
+                        pending = Some(update);
+                    }
+                    DaemonCommand::RequestPush => {
+                        let current = match cached_status.clone() {
+                            Some(status) => status,
+                            None => StatusUpdate::parse("0:Need Login")?,
+                        };
+                        debug!(status = ?current.status, "sending cached status to Noctalia on request");
+                        match notify_noctalia(&current).await {
+                            Ok(()) => last_sent = Some(current),
+                            Err(notify_error) => {
+                                warn!(error = %notify_error, "failed to send requested status to Noctalia");
+                            }
+                        }
+                    }
+                }
             },
             _ = tick.tick() => {
                 let now = Instant::now();
@@ -416,8 +457,12 @@ async fn run_daemon() -> Result<()> {
                         }
                         if session.is_none() {
                             debug!("notifying Noctalia that login is required");
-                            if let Err(notify_error) = notify_noctalia(&StatusUpdate::parse("0:Need Login")?).await {
-                                warn!(error = %notify_error, "failed to send login-required status to Noctalia");
+                            let login_required = StatusUpdate::parse("0:Need Login")?;
+                            match notify_noctalia(&login_required).await {
+                                Ok(()) => last_sent = Some(login_required),
+                                Err(notify_error) => {
+                                    warn!(error = %notify_error, "failed to send login-required status to Noctalia");
+                                }
                             }
                         }
                         next_login_notice = now + API_INTERVAL;
@@ -438,6 +483,7 @@ async fn run_daemon() -> Result<()> {
                     match apis::users_api::update_user(config, user_id, Some(request)).await {
                         Ok(_) => {
                             info!(status = ?update.status, "VRChat status update succeeded");
+                            cached_status = Some(update.clone());
                             match notify_noctalia(&update).await {
                                 Ok(()) => last_sent = Some(update.clone()),
                                 Err(notify_error) => {
@@ -451,6 +497,7 @@ async fn run_daemon() -> Result<()> {
                             if is_auth_error(&error) {
                                 warn!("VRChat rejected the saved session; waiting for cookie replacement");
                                 session = None;
+                                cached_status = None;
                                 observed_mtime = cookie_mtime(&cookie_path);
                                 next_login_notice = Instant::now();
                             }
@@ -468,6 +515,7 @@ async fn run_daemon() -> Result<()> {
                     match apis::users_api::get_user(config, user_id).await {
                         Ok(response) => {
                             let current = status_from_user(response);
+                            cached_status = Some(current.clone());
                             if last_sent.as_ref() != Some(&current) {
                                 debug!(status = ?current.status, message_len = current.message.len(), "VRChat status changed");
                                 match notify_noctalia(&current).await {
@@ -485,6 +533,7 @@ async fn run_daemon() -> Result<()> {
                             if is_auth_error(&error) {
                                 warn!("VRChat rejected the saved session; waiting for cookie replacement");
                                 session = None;
+                                cached_status = None;
                                 observed_mtime = cookie_mtime(&cookie_path);
                                 next_login_notice = Instant::now();
                             }
@@ -511,6 +560,26 @@ async fn run_daemon() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn daemon_command_parses_push_status() {
+        match parse_daemon_command("push-status 3:Available now").unwrap() {
+            DaemonCommand::PushStatus(update) => {
+                assert_eq!(update.payload(), "3:Available now");
+            }
+            DaemonCommand::RequestPush => panic!("expected push-status"),
+        }
+    }
+
+    #[test]
+    fn daemon_command_parses_request_push_without_payload() {
+        assert!(matches!(
+            parse_daemon_command("request-push").unwrap(),
+            DaemonCommand::RequestPush
+        ));
+        assert!(parse_daemon_command("request-push ignored").is_err());
+        assert!(parse_daemon_command("3:legacy format").is_err());
+    }
 
     #[test]
     fn api_limit_and_poll_cycle_use_call_start() {

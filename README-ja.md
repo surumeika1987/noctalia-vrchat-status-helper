@@ -55,7 +55,7 @@ VRChat APIへの負荷軽減を目的として、
 本ソフトウェアはUnixソケットによるIPC通信を受け付けています。  
 以下のコマンドでIPC通信を行うことができます。  
 ```sh
-vrchat-status-helper msg <payload>
+vrchat-status-helper msg push-status <payload>
 ```
 ペイロードのフォーマットは `<ステータス番号>:<ステータスメッセージ>`です。  
 ステータスメッセージは空白にすることができます。  
@@ -68,6 +68,13 @@ vrchat-status-helper msg <payload>
 | 2 | Ask Me |
 | 1 | Do Not Disturb |
 | 0 | Offline |
+
+常駐中のhelperにキャッシュ済みステータス（キャッシュがない場合は`Need Login`）を
+再送させるには、以下のコマンドを使用します。
+
+```sh
+vrchat-status-helper msg request-push
+```
 
 起動時に`RUST_LOG=debug`を付与することでデバッグログを出力できます。  
 ```sh
