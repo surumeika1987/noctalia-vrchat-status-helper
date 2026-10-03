@@ -2,7 +2,7 @@
 
 SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
 IPC_LOG_FILE="$SCRIPT_DIR/ipc.log"
-HELPER="$SCRIPT_DIR/../target/release/vrchat-status-helper"
+HELPER="$SCRIPT_DIR/../target/debug/vrchat-status-helper"
 
 TIMEOUT=5
 NOT_PASS_TEST=0
@@ -71,7 +71,6 @@ trap cleanup EXIT INT TERM
 rm -f "$IPC_LOG_FILE"
 
 cargo build \
-    --release \
     --manifest-path "$SCRIPT_DIR/../Cargo.toml" \
     2>/dev/null || exit 1
 
