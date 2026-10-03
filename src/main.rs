@@ -35,7 +35,7 @@ use vrchatapi::{
 const API_ORIGIN: &str = "https://api.vrchat.cloud/";
 const API_INTERVAL: Duration = Duration::from_secs(60);
 const USER_AGENT: &str =
-    "vrchat-status-helper/0.1.0 (https://github.com/surumeika1987/noctalia-vrchat-status)";
+    "vrchat-status-helper/0.1.0 (https://github.com/surumeika1987/noctalia-vrchat-status-helper)";
 
 #[tokio::main]
 async fn main() -> Result<()> {
