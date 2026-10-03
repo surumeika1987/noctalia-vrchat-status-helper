@@ -1,22 +1,26 @@
+```sh
 #!/bin/sh
 
 SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
 IPC_LOG_FILE="$SCRIPT_DIR/ipc.log"
-SOCKET_FILE="$SCRIPT_DIR/vrchat-status-helper.sock"
 HELPER="$SCRIPT_DIR/../target/release/vrchat-status-helper"
 
 TIMEOUT=5
 NOT_PASS_TEST=0
 PID=""
 
+# Unix socket のパス長制限を避けるため短い一時ディレクトリを使用
+RUNTIME_DIR="$(mktemp -d /tmp/vrc-status.XXXXXX)"
+SOCKET_FILE="$RUNTIME_DIR/vrchat-status-helper.sock"
+
 cleanup() {
     if [ -n "$PID" ]; then
-        kill "$PID" 2>/dev/null
-        wait "$PID" 2>/dev/null
+        kill "$PID" 2>/dev/null || true
+        wait "$PID" 2>/dev/null || true
     fi
 
     rm -f "$IPC_LOG_FILE"
-    rm -f "$SOCKET_FILE"
+    rm -rf "$RUNTIME_DIR"
 }
 
 wait_for_ipc_log() {
@@ -59,38 +63,32 @@ check_ipc_log() {
 
 run_helper() {
     PATH="$SCRIPT_DIR:$PATH" \
-    XDG_RUNTIME_DIR="$SCRIPT_DIR" \
+    XDG_RUNTIME_DIR="$RUNTIME_DIR" \
     "$HELPER" "$@"
 }
 
 trap cleanup EXIT INT TERM
 
-# 前処理
 rm -f "$IPC_LOG_FILE"
-rm -f "$SOCKET_FILE"
 
 cargo build \
     --release \
     --manifest-path "$SCRIPT_DIR/../Cargo.toml" \
     2>/dev/null || exit 1
 
-# helperをバックグラウンド起動
 run_helper test &
 PID=$!
 
-# First test
 check_ipc_log \
     "First test" \
     "msg plugin surumeika1987/vrchat-status:status all push-status 4:Test Mode"
 
-# Second test
 run_helper msg push-status '2:Test Message'
 
 check_ipc_log \
     "Second test" \
     "msg plugin surumeika1987/vrchat-status:status all push-status 2:Test Message"
 
-# Third test
 run_helper msg request-push
 
 check_ipc_log \
@@ -98,3 +96,4 @@ check_ipc_log \
     "msg plugin surumeika1987/vrchat-status:status all push-status 2:Test Message"
 
 exit "$NOT_PASS_TEST"
+```
