@@ -1,4 +1,3 @@
-```sh
 #!/bin/sh
 
 SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
@@ -96,4 +95,3 @@ check_ipc_log \
     "msg plugin surumeika1987/vrchat-status:status all push-status 2:Test Message"
 
 exit "$NOT_PASS_TEST"
-```
