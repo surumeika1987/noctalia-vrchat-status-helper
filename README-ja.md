@@ -8,6 +8,14 @@ VRChat APIは**非公式**です。
 本ソフトウェアの利用は自己責任で行なってください。  
 
 ## インストール
+以下のコマンドを実行してダウンロード、インストールしてください。  
+```sh
+mkdir -p ~/.local/bin
+wget -O ~/.local/bin/vrchat-status-helper https://github.com/surumeika1987/noctalia-vrchat-status-helper/releases/download/v0.1.0/vrchat-status-helper-x86_64-unknown-linux-gnu
+chmod +x ~/.local/bin/vrchat-status-helper
+```
+
+## ビルド
 Rustをビルドできる環境が必要です。  
 以下のコマンドを実行してビルド、インストールしてください。  
 ```sh

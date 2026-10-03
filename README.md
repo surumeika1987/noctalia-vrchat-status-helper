@@ -11,6 +11,16 @@ Use this software at your own risk.
 
 ## Installation
 
+Run the following commands to download and install the helper:
+
+```sh
+mkdir -p ~/.local/bin
+wget -O ~/.local/bin/vrchat-status-helper https://github.com/surumeika1987/noctalia-vrchat-status-helper/releases/download/v0.1.0/vrchat-status-helper-x86_64-unknown-linux-gnu
+chmod +x ~/.local/bin/vrchat-status-helper
+```
+
+## Building
+
 A Rust build environment is required.  
 Run the following commands to build and install the helper:
 
