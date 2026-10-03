@@ -193,7 +193,7 @@ async fn login() -> Result<()> {
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 enum AuthenticationErrorKind {
-    Unauthorized,
+    LoginRequired,
     Retryable,
 }
 
@@ -204,6 +204,13 @@ struct AuthenticationError {
 }
 
 impl AuthenticationError {
+    fn login_required(error: impl Into<anyhow::Error>) -> Self {
+        Self {
+            kind: AuthenticationErrorKind::LoginRequired,
+            source: error.into(),
+        }
+    }
+
     fn retryable(error: impl Into<anyhow::Error>) -> Self {
         Self {
             kind: AuthenticationErrorKind::Retryable,
@@ -216,7 +223,7 @@ impl AuthenticationError {
         T: fmt::Debug + Send + Sync + 'static,
     {
         let kind = if is_auth_error(&error) {
-            AuthenticationErrorKind::Unauthorized
+            AuthenticationErrorKind::LoginRequired
         } else {
             AuthenticationErrorKind::Retryable
         };
@@ -243,6 +250,19 @@ impl StdError for AuthenticationError {
     }
 }
 
+fn current_user_from_auth_response(
+    response: RegisterUserAccount200Response,
+) -> std::result::Result<vrchatapi::models::CurrentUser, AuthenticationError> {
+    match response {
+        RegisterUserAccount200Response::CurrentUser(user) => Ok(user),
+        RegisterUserAccount200Response::RequiresTwoFactorAuth(_) => {
+            Err(AuthenticationError::login_required(anyhow::anyhow!(
+                "saved cookie requires two-factor authentication; run login"
+            )))
+        }
+    }
+}
+
 async fn authenticate_from_cookie(
     path: &Path,
 ) -> std::result::Result<(Configuration, String, StatusUpdate), AuthenticationError> {
@@ -252,19 +272,13 @@ async fn authenticate_from_cookie(
     let response = apis::authentication_api::get_current_user(&config)
         .await
         .map_err(AuthenticationError::from_api)?;
-    match response {
-        RegisterUserAccount200Response::CurrentUser(user) => {
-            debug!("saved VRChat session is valid");
-            let current = StatusUpdate {
-                status: user.status,
-                message: user.status_description,
-            };
-            Ok((config, user.id, current))
-        }
-        _ => Err(AuthenticationError::retryable(anyhow::anyhow!(
-            "saved cookie requires two-factor authentication"
-        ))),
-    }
+    let user = current_user_from_auth_response(response)?;
+    debug!("saved VRChat session is valid");
+    let current = StatusUpdate {
+        status: user.status,
+        message: user.status_description,
+    };
+    Ok((config, user.id, current))
 }
 
 async fn send_message(payload: &str) -> Result<()> {
@@ -772,6 +786,21 @@ mod tests {
             "2:Connecting to VRChat.."
         );
         assert_eq!(unavailable_status(false).unwrap().payload(), "0:Need Login");
+    }
+
+    #[test]
+    fn two_factor_response_requires_login_without_retry() {
+        let response = RegisterUserAccount200Response::RequiresTwoFactorAuth(
+            vrchatapi::models::RequiresTwoFactorAuth::new(vec![TwoFactorAuthType::Totp]),
+        );
+
+        let error = current_user_from_auth_response(response).unwrap_err();
+
+        assert!(!error.is_retryable());
+        assert_eq!(
+            unavailable_status(error.is_retryable()).unwrap().payload(),
+            "0:Need Login"
+        );
     }
 
     #[test]
