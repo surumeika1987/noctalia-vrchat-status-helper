@@ -152,7 +152,7 @@ fn prompt(label: &str) -> Result<String> {
 async fn login() -> Result<()> {
     info!("starting interactive VRChat login");
     let username = prompt("Username")?;
-    let password = prompt("Password")?;
+    let password = rpassword::prompt_password("Password: ")?;
     let jar = Arc::new(Jar::default());
     let mut config = configuration(jar.clone())?;
     config.basic_auth = Some((username, Some(password)));
