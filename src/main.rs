@@ -2,6 +2,8 @@ mod status;
 
 use std::{
     env,
+    error::Error as StdError,
+    fmt,
     fs::{self, OpenOptions},
     io::{self, Write},
     os::unix::fs::{OpenOptionsExt, PermissionsExt},
@@ -189,11 +191,68 @@ async fn login() -> Result<()> {
     Ok(())
 }
 
-async fn authenticate_from_cookie(path: &Path) -> Result<(Configuration, String, StatusUpdate)> {
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+enum AuthenticationErrorKind {
+    Unauthorized,
+    Retryable,
+}
+
+#[derive(Debug)]
+struct AuthenticationError {
+    kind: AuthenticationErrorKind,
+    source: anyhow::Error,
+}
+
+impl AuthenticationError {
+    fn retryable(error: impl Into<anyhow::Error>) -> Self {
+        Self {
+            kind: AuthenticationErrorKind::Retryable,
+            source: error.into(),
+        }
+    }
+
+    fn from_api<T>(error: apis::Error<T>) -> Self
+    where
+        T: fmt::Debug + Send + Sync + 'static,
+    {
+        let kind = if is_auth_error(&error) {
+            AuthenticationErrorKind::Unauthorized
+        } else {
+            AuthenticationErrorKind::Retryable
+        };
+        Self {
+            kind,
+            source: error.into(),
+        }
+    }
+
+    fn is_retryable(&self) -> bool {
+        self.kind == AuthenticationErrorKind::Retryable
+    }
+}
+
+impl fmt::Display for AuthenticationError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.source.fmt(formatter)
+    }
+}
+
+impl StdError for AuthenticationError {
+    fn source(&self) -> Option<&(dyn StdError + 'static)> {
+        self.source.source()
+    }
+}
+
+async fn authenticate_from_cookie(
+    path: &Path,
+) -> std::result::Result<(Configuration, String, StatusUpdate), AuthenticationError> {
     debug!(path = %path.display(), "validating saved VRChat session");
-    let jar = load_cookie_jar(path)?;
-    let config = configuration(jar)?;
-    match apis::authentication_api::get_current_user(&config).await? {
+    let jar = load_cookie_jar(path).map_err(AuthenticationError::retryable)?;
+    let config = configuration(jar).map_err(AuthenticationError::retryable)?;
+    let response = apis::authentication_api::get_current_user(&config)
+        .await
+        .map_err(AuthenticationError::from_api)?;
+    match response {
         RegisterUserAccount200Response::CurrentUser(user) => {
             debug!("saved VRChat session is valid");
             let current = StatusUpdate {
@@ -202,7 +261,9 @@ async fn authenticate_from_cookie(path: &Path) -> Result<(Configuration, String,
             };
             Ok((config, user.id, current))
         }
-        _ => bail!("saved cookie requires two-factor authentication; run login"),
+        _ => Err(AuthenticationError::retryable(anyhow::anyhow!(
+            "saved cookie requires two-factor authentication"
+        ))),
     }
 }
 
@@ -267,8 +328,15 @@ fn is_auth_error<T>(error: &apis::Error<T>) -> bool {
         error,
         apis::Error::ResponseError(response)
             if response.status == reqwest::StatusCode::UNAUTHORIZED
-                || response.status == reqwest::StatusCode::FORBIDDEN
     )
+}
+
+fn unavailable_status(retryable: bool) -> Result<StatusUpdate> {
+    if retryable {
+        StatusUpdate::parse("2:Connecting to VRChat..")
+    } else {
+        StatusUpdate::parse("0:Need Login")
+    }
 }
 
 fn status_from_user(response: GetUser200Response) -> StatusUpdate {
@@ -377,29 +445,29 @@ async fn run_daemon() -> Result<()> {
     });
 
     let initial_api_started_at = Instant::now();
-    let (mut session, initial_status) = match authenticate_from_cookie(&cookie_path).await {
-        Ok((config, user_id, current)) => (Some((config, user_id)), Some(current)),
-        Err(auth_error) => {
-            warn!(error = %auth_error, "saved VRChat session is unavailable");
-            (None, None)
-        }
-    };
+    let (mut session, initial_status, mut retry_authentication) =
+        match authenticate_from_cookie(&cookie_path).await {
+            Ok((config, user_id, current)) => (Some((config, user_id)), current, false),
+            Err(auth_error) => {
+                let retryable = auth_error.is_retryable();
+                warn!(error = %auth_error, retryable, "saved VRChat session is unavailable");
+                (None, unavailable_status(retryable)?, retryable)
+            }
+        };
     let mut observed_mtime = cookie_mtime(&cookie_path);
     let mut pending: Option<StatusUpdate> = None;
     let mut last_sent: Option<StatusUpdate> = None;
-    let mut cached_status = initial_status;
-    if let Some(current) = cached_status.clone() {
-        info!(status = ?current.status, "initial VRChat status received during authentication");
-        match notify_noctalia(&current).await {
-            Ok(()) => last_sent = Some(current),
-            Err(notify_error) => {
-                warn!(error = %notify_error, "failed to send initial status to Noctalia");
-            }
+    let mut cached_status = Some(initial_status.clone());
+    info!(status = ?initial_status.status, "initial helper status determined");
+    match notify_noctalia(&initial_status).await {
+        Ok(()) => last_sent = Some(initial_status),
+        Err(notify_error) => {
+            warn!(error = %notify_error, "failed to send initial status to Noctalia");
         }
     }
     let mut next_api = initial_api_started_at + API_INTERVAL;
     let mut next_poll = next_api;
-    let mut next_login_notice = Instant::now();
+    let mut next_unavailable_notice = Instant::now() + API_INTERVAL;
     let mut tick = time::interval(Duration::from_secs(1));
 
     loop {
@@ -412,10 +480,9 @@ async fn run_daemon() -> Result<()> {
                         pending = Some(update);
                     }
                     DaemonCommand::RequestPush => {
-                        let current = match cached_status.clone() {
-                            Some(status) => status,
-                            None => StatusUpdate::parse("0:Need Login")?,
-                        };
+                        let current = cached_status
+                            .clone()
+                            .unwrap_or(unavailable_status(retry_authentication)?);
                         debug!(status = ?current.status, "sending cached status to Noctalia on request");
                         match notify_noctalia(&current).await {
                             Ok(()) => last_sent = Some(current),
@@ -429,45 +496,53 @@ async fn run_daemon() -> Result<()> {
             _ = tick.tick() => {
                 let now = Instant::now();
                 if session.is_none() {
-                    if now >= next_login_notice {
-                        let mtime = cookie_mtime(&cookie_path);
-                        if mtime != observed_mtime && now >= next_api {
+                    let mtime = cookie_mtime(&cookie_path);
+                    let cookie_changed = mtime != observed_mtime;
+                    if now >= next_api && (retry_authentication || cookie_changed) {
+                        if cookie_changed {
                             debug!("cookie file changed; retrying VRChat authentication");
-                            observed_mtime = mtime;
-                            let api_started_at = Instant::now();
-                            session = match authenticate_from_cookie(&cookie_path).await {
-                                Ok((config, user_id, current)) => {
-                                    info!(status = ?current.status, "VRChat session restored");
-                                    cached_status = Some(current.clone());
-                                    match notify_noctalia(&current).await {
-                                        Ok(()) => last_sent = Some(current),
-                                        Err(notify_error) => {
-                                            warn!(error = %notify_error, "failed to send restored status to Noctalia");
-                                        }
+                        } else {
+                            debug!("retrying VRChat authentication after transient failure");
+                        }
+                        observed_mtime = mtime;
+                        let api_started_at = Instant::now();
+                        match authenticate_from_cookie(&cookie_path).await {
+                            Ok((config, user_id, current)) => {
+                                info!(status = ?current.status, "VRChat session restored");
+                                retry_authentication = false;
+                                cached_status = Some(current.clone());
+                                match notify_noctalia(&current).await {
+                                    Ok(()) => last_sent = Some(current),
+                                    Err(notify_error) => {
+                                        warn!(error = %notify_error, "failed to send restored status to Noctalia");
                                     }
-                                    Some((config, user_id))
                                 }
-                                Err(auth_error) => {
-                                    warn!(error = %auth_error, "VRChat reauthentication failed");
-                                    None
-                                }
-                            };
-                            next_api = api_started_at + API_INTERVAL;
-                            if session.is_some() {
-                                next_poll = next_api;
+                                session = Some((config, user_id));
+                            }
+                            Err(auth_error) => {
+                                retry_authentication = auth_error.is_retryable();
+                                warn!(error = %auth_error, retryable = retry_authentication, "VRChat reauthentication failed");
+                                cached_status = Some(unavailable_status(retry_authentication)?);
                             }
                         }
+                        next_api = api_started_at + API_INTERVAL;
+                        if session.is_some() {
+                            next_poll = next_api;
+                        }
+                    }
+                    if now >= next_unavailable_notice {
                         if session.is_none() {
-                            debug!("notifying Noctalia that login is required");
-                            let login_required = StatusUpdate::parse("0:Need Login")?;
-                            match notify_noctalia(&login_required).await {
-                                Ok(()) => last_sent = Some(login_required),
+                            let unavailable = unavailable_status(retry_authentication)?;
+                            debug!(retryable = retry_authentication, "notifying Noctalia that VRChat is unavailable");
+                            cached_status = Some(unavailable.clone());
+                            match notify_noctalia(&unavailable).await {
+                                Ok(()) => last_sent = Some(unavailable),
                                 Err(notify_error) => {
-                                    warn!(error = %notify_error, "failed to send login-required status to Noctalia");
+                                    warn!(error = %notify_error, "failed to send unavailable status to Noctalia");
                                 }
                             }
                         }
-                        next_login_notice = now + API_INTERVAL;
+                        next_unavailable_notice = now + API_INTERVAL;
                     }
                     continue;
                 }
@@ -499,9 +574,10 @@ async fn run_daemon() -> Result<()> {
                             if is_auth_error(&error) {
                                 warn!("VRChat rejected the saved session; waiting for cookie replacement");
                                 session = None;
-                                cached_status = None;
+                                retry_authentication = false;
+                                cached_status = Some(unavailable_status(false)?);
                                 observed_mtime = cookie_mtime(&cookie_path);
-                                next_login_notice = Instant::now();
+                                next_unavailable_notice = Instant::now();
                             }
                         }
                     }
@@ -535,9 +611,10 @@ async fn run_daemon() -> Result<()> {
                             if is_auth_error(&error) {
                                 warn!("VRChat rejected the saved session; waiting for cookie replacement");
                                 session = None;
-                                cached_status = None;
+                                retry_authentication = false;
+                                cached_status = Some(unavailable_status(false)?);
                                 observed_mtime = cookie_mtime(&cookie_path);
-                                next_login_notice = Instant::now();
+                                next_unavailable_notice = Instant::now();
                             }
                         }
                     }
@@ -665,6 +742,36 @@ mod tests {
         );
 
         assert_eq!(next_poll, scheduled + two_intervals + API_INTERVAL);
+    }
+
+    #[test]
+    fn only_unauthorized_response_is_an_authentication_error() {
+        let response_error = |status| {
+            apis::Error::<()>::ResponseError(apis::ResponseContent {
+                status,
+                content: String::new(),
+                entity: None,
+            })
+        };
+
+        assert!(is_auth_error(&response_error(
+            reqwest::StatusCode::UNAUTHORIZED
+        )));
+        assert!(!is_auth_error(&response_error(
+            reqwest::StatusCode::FORBIDDEN
+        )));
+        assert!(!is_auth_error(&response_error(
+            reqwest::StatusCode::INTERNAL_SERVER_ERROR
+        )));
+    }
+
+    #[test]
+    fn unavailable_status_distinguishes_retry_from_login() {
+        assert_eq!(
+            unavailable_status(true).unwrap().payload(),
+            "2:Connecting to VRChat.."
+        );
+        assert_eq!(unavailable_status(false).unwrap().payload(), "0:Need Login");
     }
 
     #[test]
