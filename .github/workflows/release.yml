@@ -1,0 +1,81 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "*"
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  release:
+    name: Build and release
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Check semantic version tag
+        id: semver
+        shell: bash
+        run: |
+          tag="${GITHUB_REF_NAME}"
+          version="${tag#v}"
+          semver='^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-((0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)(\.(0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*))*))?(\+([0-9A-Za-z-]+)(\.[0-9A-Za-z-]+)*)?$'
+
+          if [[ "${version}" =~ ${semver} ]]; then
+            echo "is_semver=true" >> "${GITHUB_OUTPUT}"
+            echo "version=${version}" >> "${GITHUB_OUTPUT}"
+          else
+            echo "is_semver=false" >> "${GITHUB_OUTPUT}"
+            echo "Ignoring non-SemVer tag: ${tag}"
+          fi
+
+      - name: Check out repository
+        if: steps.semver.outputs.is_semver == 'true'
+        uses: actions/checkout@v5
+
+      - name: Install stable Rust
+        if: steps.semver.outputs.is_semver == 'true'
+        run: |
+          rustup toolchain install stable --profile minimal --no-self-update
+          rustup default stable
+
+      - name: Run Rust tests
+        if: steps.semver.outputs.is_semver == 'true'
+        run: cargo test --locked
+
+      - name: Run integration tests
+        if: steps.semver.outputs.is_semver == 'true'
+        run: ./test/test.sh
+
+      - name: Build release binary
+        if: steps.semver.outputs.is_semver == 'true'
+        run: cargo build --release --locked
+
+      - name: Prepare release assets
+        if: steps.semver.outputs.is_semver == 'true'
+        run: |
+          mkdir -p dist
+          install -m 0755 \
+            target/release/vrchat-status-helper \
+            dist/vrchat-status-helper-x86_64-unknown-linux-gnu
+          sha256sum \
+            dist/vrchat-status-helper-x86_64-unknown-linux-gnu \
+            > dist/vrchat-status-helper-x86_64-unknown-linux-gnu.sha256
+
+      - name: Create GitHub release
+        if: steps.semver.outputs.is_semver == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_VERSION: ${{ steps.semver.outputs.version }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" \
+            dist/vrchat-status-helper-x86_64-unknown-linux-gnu \
+            dist/vrchat-status-helper-x86_64-unknown-linux-gnu.sha256 \
+            --verify-tag \
+            --generate-notes \
+            --title "vrchat-status-helper ${RELEASE_VERSION}"
