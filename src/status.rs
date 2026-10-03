@@ -1,6 +1,8 @@
 use anyhow::{Result, bail};
 use vrchatapi::models::UserStatus;
 
+const MAX_STATUS_MESSAGE_LENGTH: usize = 32;
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct StatusUpdate {
     pub status: UserStatus,
@@ -14,6 +16,12 @@ impl StatusUpdate {
             .ok_or_else(|| anyhow::anyhow!("payload must be <status-number>:<message>"))?;
         if number.len() != 1 {
             bail!("status number must be one digit");
+        }
+        let message_length = message.chars().count();
+        if message_length > MAX_STATUS_MESSAGE_LENGTH {
+            bail!(
+                "status message must be at most {MAX_STATUS_MESSAGE_LENGTH} characters (got {message_length})"
+            );
         }
         let status = match number {
             "4" => UserStatus::JoinMe,
@@ -56,5 +64,24 @@ mod tests {
     #[test]
     fn message_may_contain_colons() {
         assert_eq!(StatusUpdate::parse("3:a:b").unwrap().message, "a:b");
+    }
+
+    #[test]
+    fn message_allows_32_characters() {
+        let message = "あ".repeat(32);
+        let payload = format!("3:{message}");
+
+        assert_eq!(StatusUpdate::parse(&payload).unwrap().message, message);
+    }
+
+    #[test]
+    fn message_rejects_33_characters() {
+        let payload = format!("3:{}", "あ".repeat(33));
+        let error = StatusUpdate::parse(&payload).unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "status message must be at most 32 characters (got 33)"
+        );
     }
 }
