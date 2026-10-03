@@ -50,6 +50,10 @@ async fn main() -> Result<()> {
             debug!(mode = "login", "starting helper");
             login().await
         }
+        [command] if command == "test" => {
+            debug!(mode = "test", "starting helper");
+            run_test_mode().await
+        }
         [command, subcommand, payload] if command == "msg" && subcommand == "push-status" => {
             debug!(
                 mode = "msg",
@@ -64,7 +68,7 @@ async fn main() -> Result<()> {
             send_message("request-push").await
         }
         _ => bail!(
-            "usage: vrchat-status-helper [login | msg push-status <status-number>:<message> | msg request-push]"
+            "usage: vrchat-status-helper [login | test | msg push-status <status-number>:<message> | msg request-push]"
         ),
     }
 }
@@ -557,6 +561,54 @@ async fn run_daemon() -> Result<()> {
     Ok(())
 }
 
+fn apply_test_command(current: &mut StatusUpdate, command: DaemonCommand) -> Option<StatusUpdate> {
+    match command {
+        DaemonCommand::PushStatus(update) if update != *current => {
+            *current = update.clone();
+            Some(update)
+        }
+        DaemonCommand::PushStatus(_) => None,
+        DaemonCommand::RequestPush => Some(current.clone()),
+    }
+}
+
+async fn run_test_mode() -> Result<()> {
+    let socket_path = socket_path()?;
+    let (listener, _guard) = bind_socket(&socket_path).await?;
+    let (tx, mut rx) = mpsc::channel(16);
+    tokio::spawn(async move {
+        if let Err(error) = socket_server(listener, tx).await {
+            error!(error = %error, "test mode socket server stopped");
+        }
+    });
+
+    let mut current = StatusUpdate::parse("4:Test Mode")?;
+    info!(status = ?current.status, "test mode started");
+    if let Err(error) = notify_noctalia(&current).await {
+        warn!(error = %error, "failed to send initial test status to Noctalia");
+    }
+
+    loop {
+        tokio::select! {
+            Some(command) = rx.recv() => {
+                if let Some(update) = apply_test_command(&mut current, command) {
+                    debug!(status = ?update.status, message_len = update.message.len(), "sending test status to Noctalia");
+                    if let Err(error) = notify_noctalia(&update).await {
+                        warn!(error = %error, "failed to send test status to Noctalia");
+                    }
+                }
+            }
+            _ = tokio::signal::ctrl_c() => {
+                info!("received shutdown signal");
+                break;
+            }
+        }
+    }
+
+    info!("helper test mode stopped");
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -615,5 +667,39 @@ mod tests {
         );
 
         assert_eq!(next_poll, scheduled + two_intervals + API_INTERVAL);
+    }
+
+    #[test]
+    fn test_mode_updates_and_returns_changed_status() {
+        let mut current = StatusUpdate::parse("4:Test Mode").unwrap();
+        let changed = apply_test_command(
+            &mut current,
+            DaemonCommand::PushStatus(StatusUpdate::parse("2:Ask first").unwrap()),
+        )
+        .unwrap();
+
+        assert_eq!(current.payload(), "2:Ask first");
+        assert_eq!(changed.payload(), "2:Ask first");
+    }
+
+    #[test]
+    fn test_mode_does_not_return_unchanged_status() {
+        let mut current = StatusUpdate::parse("4:Test Mode").unwrap();
+        let unchanged = apply_test_command(
+            &mut current,
+            DaemonCommand::PushStatus(StatusUpdate::parse("4:Test Mode").unwrap()),
+        );
+
+        assert!(unchanged.is_none());
+        assert_eq!(current.payload(), "4:Test Mode");
+    }
+
+    #[test]
+    fn test_mode_request_push_returns_current_status() {
+        let mut current = StatusUpdate::parse("3:Available").unwrap();
+        let requested = apply_test_command(&mut current, DaemonCommand::RequestPush).unwrap();
+
+        assert_eq!(requested.payload(), "3:Available");
+        assert_eq!(current.payload(), "3:Available");
     }
 }

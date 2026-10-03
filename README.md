@@ -63,6 +63,19 @@ end)
 To reduce load on the VRChat API, this software limits API access to once every 60 seconds.  
 As a result, changes may take some time to appear in VRChat.
 
+### Test Mode
+
+Start the helper with only the `test` argument to test the plugin without
+connecting to the VRChat API:
+
+```sh
+vrchat-status-helper test
+```
+
+Test mode starts with `4:Test Mode`. When it receives a `push-status` IPC
+message, it updates its in-memory status and immediately forwards changed
+statuses to the Noctalia plugin.
+
 ### For Developers
 
 This software accepts IPC messages over a Unix domain socket.  
